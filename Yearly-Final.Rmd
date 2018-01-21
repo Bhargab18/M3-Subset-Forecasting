@@ -1,0 +1,1107 @@
+---
+  title: "Final Project - Forecasting"
+  author: "Simon Terry, Bhargab Dhar, Siddharth Jain"
+  date: "4 October 2017"
+  output: html_document
+---
+  
+  
+#INTRODUCTION
+  
+  The dataset is a subset of the M3 original dataset which contains 3003 time series. For this project, the number of datasets used were 303 with 101 series in yearly format, 101 series in quarterly format and 101 series in monthly format. Each of the series differ in their length and starting date. 
+  
+#METHODOLOGY
+  
+  The entire dataset is divided into training and test set. We have tried to maintain a 95% training and 5% test set mostly, but in some cases, we have changed it due to the fact that some of the series are too small and 5% test data was not enough to test best model selected from the training set. 
+  
+  State space models have been used for modelling purposes and the best model has been selected based on the lowest MASE score.
+  
+  Each of the yearly, monthly and quarterly series are finally assigned one general model and the respective MASE scores calculated. The residuals are checked collectively after application of the final selected model using standard shapiro test for normality checking.
+  
+  
+  
+```{r setup, include=FALSE}
+  knitr::opts_chunk$set(echo = TRUE)
+  
+  library(dplyr)
+  library(TSA)
+  library(forecast)
+  library(readr)
+  
+  
+```
+  
+```{r, cache=TRUE, include=FALSE}
+  GoFVals = function(data, H, models){
+    M = length(models) # The number of competing models
+    N = length(data) # The number of considered time series
+    fit.models = list()
+    series = array(NA, N*M)
+    FittedModels = array(NA, N*M)
+    AIC = array(NA, N*M)
+    AICc = array(NA, N*M)
+    BIC = array(NA, N*M)
+    HQIC = array(NA, N*M)
+    MASE = array(NA, N*M)
+    # mean.MASE = array(NA, N)
+    # median.MASE = array(NA, N)
+    GoF = data.frame(series, FittedModels, AIC, AICc, BIC, HQIC, MASE)
+    count = 0
+    for ( j in 1:N){
+      # sum.MASE = 0
+      # sample.median = array(NA, M)
+      for ( i in 1: M){
+        count = count + 1
+        fit.models[[count]] = ets(data[[j]], model = models[i])
+        GoF$AIC[count] = fit.models[[count]]$aic
+        GoF$AICc[count] = fit.models[[count]]$aicc
+        GoF$BIC[count] = fit.models[[count]]$bic
+        q = length(fit.models[[count]]$par)
+        GoF$HQIC[count] = -2*fit.models[[count]]$loglik+ 2*q*log(log(length(data[[j]])))
+        GoF$MASE[count] = accuracy(fit.models[[count]])[6]
+        # sum.MASE = sum.MASE + GoF$MASE[count]
+        # sample.median[i] = GoF$MASE[count]
+        GoF$series[count] = j
+        GoF$FittedModels[count] = models[i]
+      }
+      # mean.MASE[j] = sum.MASE / N
+      # median.MASE[j] = median(sample.median)
+    }
+    return(list(GoF = GoF))#, mean.MASE = mean.MASE, median.MASE = median.MASE))
+  }
+  
+  LEIC = function(data, H, models){
+    M = length(models) # The number of competing models
+    N = length(data) # The number of considered time series
+    n = array(NA, N) # Array to hold the length of each series
+    for ( j in 1:N){ # Find the length of each series
+      n[j] = length(data[[j]]) 
+    }
+    n.max = max(n)
+    n.star = n - H
+    
+    # Fit the models
+    fit.models = list()
+    count = 0
+    for ( j in 1:N ){ # For each series of length nj*
+      for ( i in 1:M){ # Fit all models
+        count = count + 1
+        fit.models[[count]] = ets(ts(data[[j]][1:n.star],frequency = frequency(data[[j]])), model = models[i])
+      }
+    }
+    
+    c = seq(0.15 , 2*log(n.max) , 0.05)
+    ASE = array(NA, dim = c(H, length(c), N))
+    MASE = array(NA, dim = c(H, length(c)))
+    leic = array(NA, count)
+    for ( k in 1:length(c)){
+      count = 0
+      for ( j in 1:N ){
+        for ( i in 1:M){
+          count = count + 1
+          q = length(fit.models[[count]]$par) # the number of parameters + the number of free states
+          leic[count] = -2*fit.models[[count]]$loglik + q * c[k]
+        }
+      }
+  
+      best.model = fit.models[[which(leic == min(leic))]]# gives the order of the model with miniumum leic
+      summ = 0
+      for (h in 1:H){
+        summ = 0
+        for ( j in 1:N){
+          summ.2 = 0
+          for ( t in 2:n[j] ){
+            summ.2 = summ.2 + abs(data[[j]][t] - data[[j]][t-1])
+          }
+          ASE[h, k , j] = sum( abs(data[[j]][(n.star + 1):(n.star+h)] - forecast(best.model, h = h)$mean) / summ.2 )
+          summ = summ + ASE[h, k , j]
+        }
+        MASE[h, k] = summ / N
+      }
+    }
+    ch = array(NA, H)
+    for ( h in 1:H){
+      ch[h] = MASE[h, min( which(min(MASE[h,]) == MASE[h, ]) )] # the first min is to take minimum of minimums
+    }
+    c.opt = mean(ch)
+    
+    series = array(NA, N*M)
+    FittedModels = array(NA, N*M)
+    values = array(NA, N*M)
+    leic = data.frame(series, FittedModels, values)
+    count = 0
+    for ( j in 1:N ){
+      for ( i in 1:M){
+        count = count + 1
+        q = length(fit.models[[count]]$par) # the number of parameters + the number of free states
+        leic$series[count] = j
+        leic$FittedModels[count] = models[i]
+        leic$values[count] = -2*fit.models[[count]]$loglik + q * c.opt
+      }
+    }
+  
+    return(list(leic = leic, c.opt = c.opt))
+  }
+  
+  
+  MASEvalues = function(data, H, model, MASEs){
+    # MASEs: All MASE values resulting from GoFVals() function
+    N = length(data) # The number of considered time series
+    MASEs = sort(MASEs)
+    MASE.model = array(NA, N)
+    MASE.rank = array(NA, N)
+    fit.models = list()
+    for ( j in 1:N){
+      fit.models[[j]] = ets(data[[j]], model = model)
+      MASE.model[j] = accuracy(fit.models[[j]])[6]
+      MASE.rank[j] = which(MASE.model[j] == MASEs)
+    }
+    mean.rank.MASE = mean(MASE.rank)
+    mean.MASE = mean(MASE.model) # O procedure ile secilen modelin j tane veri kumesi uzerinden ortalamasi
+    median.MASE = median(MASE.model)
+    return(list(mean.rank.MASE = mean.rank.MASE, mean.MASE = mean.MASE, median.MASE = median.MASE))
+  }
+  
+  pVal = function(data, H, models){
+    M = length(models) # The number of competing models
+    N = length(data) # The number of considered time series
+    n = array(NA, N) # Array to hold the length of each series
+    for ( j in 1:N){ # Find the length of each series
+      n[j] = length(data[[j]]) 
+    }
+    n.max = max(n)
+    n.star = n - H
+    
+    # Fit the models
+    fit.models = list()
+    forecasts = list()
+    count = 0
+    for ( j in 1:N ){ # For each series of length nj*
+      for ( i in 1:M){ # Fit all models
+        count = count + 1
+        fit.models[[count]] = ets(ts(data[[j]][1:n.star],frequency = frequency(data[[j]])), model = models[i])
+        forecasts[[count]] = forecast(fit.models[[count]])$mean
+      }
+    }
+    
+    ASE = array(NA, dim = c(H, M, N))
+    MASE.1 = array(NA, dim = c(M, N))
+    MASE = array(NA, N)
+    MASE.model = array(NA, N)
+    
+    summ = 0
+    for (h in 1:H){
+      summ = 0
+      count = 0
+      for ( j in 1:N){
+        MAE = 0
+        for ( t in 2:n[j] ){
+          MAE = MAE + abs(data[[j]][t] - data[[j]][t-1])
+        }
+        for ( i in 1:M ){
+          count = count + 1
+          ASE[h, i , j] = sum( abs(data[[j]][(n.star + 1):(n.star+h)] - forecast(fit.models[[count]], h = h)$mean) / MAE )
+        }
+      }
+    }
+    
+    for ( j in 1:N){
+      for ( i in 1:M ){
+        MASE.1[i , j] = 0
+        for (h in 1:H){
+          MASE.1[i , j] = MASE.1[i , j] + ASE[h, i , j] 
+        }
+        MASE.1[i , j] = MASE.1[i , j]  / H
+      }
+      MASE[j] = min(MASE.1[ , j])
+      MASE.model[j] = models[which(MASE[j] == MASE.1[ , j] )]
+    }
+    
+    return(list(MASE = MASE, best.model = MASE.model))
+  }
+  MASE.forecast = function(training, test, forecasts){
+    # training: Training set, should be vector. 
+    # test: Test set, should be vector. 
+    # forecasts: Forecasts obtained by the best model, should be vector. 
+    # The number of forecasts should be the same as the lenght of test set.
+    n = length(training)
+   e.t = test - forecasts
+    sum = 0 
+    for (i in 2:n){
+      sum = sum + abs(training[i] - training[i-1] )
+    }
+    
+  
+    q.t = e.t / (sum/(n-1))
+    MASE = mean(abs(q.t))
+    return(MASE = MASE)
+  }
+  
+  
+  
+  
+```
+  
+```{r, cache=TRUE, echo=FALSE}
+  
+  GoFVals_damped = function(data, H, models){
+    M = length(models) # The number of competing models
+    N = length(data) # The number of considered time series
+    fit.models = list()
+    series = array(NA, N*M)
+    FittedModels = array(NA, N*M)
+    AIC = array(NA, N*M)
+    AICc = array(NA, N*M)
+    BIC = array(NA, N*M)
+    HQIC = array(NA, N*M)
+    MASE = array(NA, N*M)
+    # mean.MASE = array(NA, N)
+    # median.MASE = array(NA, N)
+    GoF = data.frame(series, FittedModels, AIC, AICc, BIC, HQIC, MASE)
+    count = 0
+    for ( j in 1:N){
+      # sum.MASE = 0
+      # sample.median = array(NA, M)
+      for ( i in 1: M){
+        count = count + 1
+        fit.models[[count]] = ets(data[[j]], model = models[i],damped = TRUE)
+        GoF$AIC[count] = fit.models[[count]]$aic
+        GoF$AICc[count] = fit.models[[count]]$aicc
+        GoF$BIC[count] = fit.models[[count]]$bic
+        q = length(fit.models[[count]]$par)
+        GoF$HQIC[count] = -2*fit.models[[count]]$loglik+ 2*q*log(log(length(data[[j]])))
+        GoF$MASE[count] = accuracy(fit.models[[count]])[6]
+        # sum.MASE = sum.MASE + GoF$MASE[count]
+        # sample.median[i] = GoF$MASE[count]
+        GoF$series[count] = j
+        GoF$FittedModels[count] = models[i]
+      }
+      # mean.MASE[j] = sum.MASE / N
+      # median.MASE[j] = median(sample.median)
+    }
+    return(list(GoF = GoF))#, mean.MASE = mean.MASE, median.MASE = median.MASE))
+  }
+  
+  LEIC_damped = function(data, H, models){
+    M = length(models) # The number of competing models
+    N = length(data) # The number of considered time series
+    n = array(NA, N) # Array to hold the length of each series
+    for ( j in 1:N){ # Find the length of each series
+      n[j] = length(data[[j]]) 
+    }
+    n.max = max(n)
+    n.star = n - H
+    
+    # Fit the models
+    fit.models = list()
+    count = 0
+    for ( j in 1:N ){ # For each series of length nj*
+      for ( i in 1:M){ # Fit all models
+        count = count + 1
+        fit.models[[count]] = ets(ts(data[[j]][1:n.star],frequency = frequency(data[[j]])), model = models[i],damped = TRUE)
+      }
+    }
+    
+    c = seq(0.15 , 2*log(n.max) , 0.05)
+    ASE = array(NA, dim = c(H, length(c), N))
+    MASE = array(NA, dim = c(H, length(c)))
+    leic = array(NA, count)
+    for ( k in 1:length(c)){
+      count = 0
+      for ( j in 1:N ){
+        for ( i in 1:M){
+          count = count + 1
+          q = length(fit.models[[count]]$par) # the number of parameters + the number of free states
+          leic[count] = -2*fit.models[[count]]$loglik + q * c[k]
+        }
+      }
+      
+      best.model = fit.models[[which(leic == min(leic))]]# gives the order of the model with miniumum leic
+      summ = 0
+      for (h in 1:H){
+        summ = 0
+        for ( j in 1:N){
+          summ.2 = 0
+          for ( t in 2:n[j] ){
+            summ.2 = summ.2 + abs(data[[j]][t] - data[[j]][t-1])
+          }
+          ASE[h, k , j] = sum( abs(data[[j]][(n.star + 1):(n.star+h)] - forecast(best.model, h = h)$mean) / summ.2 )
+          summ = summ + ASE[h, k , j]
+        }
+        MASE[h, k] = summ / N
+      }
+    }
+    ch = array(NA, H)
+    for ( h in 1:H){
+      ch[h] = MASE[h, min( which(min(MASE[h,]) == MASE[h, ]) )] # the first min is to take minimum of minimums
+    }
+    c.opt = mean(ch)
+    
+    series = array(NA, N*M)
+    FittedModels = array(NA, N*M)
+    values = array(NA, N*M)
+    leic = data.frame(series, FittedModels, values)
+    count = 0
+    for ( j in 1:N ){
+      for ( i in 1:M){
+        count = count + 1
+        q = length(fit.models[[count]]$par) # the number of parameters + the number of free states
+        leic$series[count] = j
+        leic$FittedModels[count] = models[i]
+        leic$values[count] = -2*fit.models[[count]]$loglik + q * c.opt
+      }
+    }
+    
+    return(list(leic = leic, c.opt = c.opt))
+  }
+  
+  MASEvalues_Damped = function(data, H, model, MASEs){
+    # MASEs: All MASE values resulting from GoFVals() function
+    N = length(data) # The number of considered time series
+    MASEs = sort(MASEs)
+    MASE.model = array(NA, N)
+    MASE.rank = array(NA, N)
+    fit.models = list()
+    for ( j in 1:N){
+      fit.models[[j]] = ets(data[[j]], model = model,damped = TRUE)
+      MASE.model[j] = accuracy(fit.models[[j]])[6]
+      MASE.rank[j] = which(MASE.model[j] == MASEs)
+    }
+    mean.rank.MASE = mean(MASE.rank)
+    mean.MASE = mean(MASE.model) # O procedure ile secilen modelin j tane veri kumesi uzerinden ortalamasi
+    median.MASE = median(MASE.model)
+    return(list(mean.rank.MASE = mean.rank.MASE, mean.MASE = mean.MASE, median.MASE = median.MASE))
+  }
+  
+  pVal_damped= function(data, H, models){
+    M = length(models) # The number of competing models
+    N = length(data) # The number of considered time series
+    n = array(NA, N) # Array to hold the length of each series
+    for ( j in 1:N){ # Find the length of each series
+      n[j] = length(data[[j]]) 
+    }
+    n.max = max(n)
+    n.star = n - H
+    
+    # Fit the models
+    fit.models = list()
+    forecasts = list()
+    count = 0
+    for ( j in 1:N ){ # For each series of length nj*
+      for ( i in 1:M){ # Fit all models
+        count = count + 1
+        fit.models[[count]] = ets(ts(data[[j]][1:n.star],frequency = frequency(data[[j]])), model = models[i],damped = TRUE)
+        forecasts[[count]] = forecast(fit.models[[count]])$mean
+      }
+    }
+    
+    ASE = array(NA, dim = c(H, M, N))
+    MASE.1 = array(NA, dim = c(M, N))
+    MASE = array(NA, N)
+    MASE.model = array(NA, N)
+    
+    summ = 0
+    for (h in 1:H){
+      summ = 0
+      count = 0
+      for ( j in 1:N){
+        MAE = 0
+        for ( t in 2:n[j] ){
+          MAE = MAE + abs(data[[j]][t] - data[[j]][t-1])
+        }
+        for ( i in 1:M ){
+          count = count + 1
+          ASE[h, i , j] = sum( abs(data[[j]][(n.star + 1):(n.star+h)] - forecast(fit.models[[count]], h = h)$mean) / MAE )
+        }
+      }
+    }
+    
+    for ( j in 1:N){
+      for ( i in 1:M ){
+        MASE.1[i , j] = 0
+        for (h in 1:H){
+          MASE.1[i , j] = MASE.1[i , j] + ASE[h, i , j] 
+        }
+        MASE.1[i , j] = MASE.1[i , j]  / H
+      }
+      MASE[j] = min(MASE.1[ , j])
+      MASE.model[j] = models[which(MASE[j] == MASE.1[ , j] )]
+    }
+    
+    return(list(MASE = MASE, best.model = MASE.model))
+  }
+  
+  MASE.forecast = function(training, test, forecasts){
+    # training: Training set, should be vector. 
+    # test: Test set, should be vector. 
+    # forecasts: Forecasts obtained by the best model, should be vector. 
+    # The number of forecasts should be the same as the lenght of test set.
+    n = length(training)
+    e.t = test - forecasts
+    sum = 0 
+    for (i in 2:n){
+      sum = sum + abs(training[i] - training[i-1] )
+    }
+    
+  
+    q.t = e.t/ (sum/(n-1))
+    MASE = mean(abs(q.t))
+    return(MASE = MASE)
+  }
+  
+  
+```
+  
+  
+#Yearly Series
+  
+Importing the data and splitting into training and test data set. The yearly series does not have seasonality, so we will only be using the non seasonal state space models.
+```{r, cache=TRUE,warning=FALSE,message=FALSE}
+  m3Year <- read_csv("C:/Users/Bhargab/Desktop/M3C_reducedYear.csv")
+  m3Year <- as.data.frame(m3Year)
+  
+  
+  
+  Len <- nrow(m3Year)
+  name <- "M3Year" 
+  ls.Year <- vector("list",Len)
+  ls.Year.train <- vector("list", Len)
+  ls.Year.test <- vector("list",Len)
+  ls.Year.start <- vector("list", Len)
+  ls.Year.test.start <- vector("list", Len)
+  for (i in 1:Len) {
+    seriesLen <- m3Year[i,"N"]
+    Splitcolf <- floor(seriesLen*0.95)
+    Splitcolc <- ceiling(seriesLen*0.95)
+    
+    #for whole numbers floor and ceiling were the same resulting in values 
+    #being shared between the test and training sets, take a value from the training set
+    if (Splitcolf == Splitcolc){
+      Splitcolf <- Splitcolf - 1
+    }
+    
+    # this makes the test set a minium of three values
+    if ((seriesLen - Splitcolc) < 3){
+      Splitcolc <- seriesLen - 3
+      Splitcolf <- seriesLen - 4
+    }
+    
+    #add six because series values start in the seventh column
+    seriesLen <- seriesLen + 6
+    Splitcolf <- Splitcolf  + 6
+    Splitcolc <- Splitcolc + 6
+    
+    
+    ls.Year[[i]] <- as.vector(t(as.matrix(m3Year[i,7:seriesLen])))
+    ls.Year.train[[i]] <- as.vector(t(as.matrix(m3Year[i,7:Splitcolf])))
+    ls.Year.test[[i]] <- as.vector(t(as.matrix(m3Year[i,Splitcolc:seriesLen])))
+    ls.Year.start[[i]] <- c(m3Year[i,5],m3Year[i,6])
+    ls.Year.test.start[[i]] <- c(m3Year[i,5]+Splitcolf-6,m3Year[i,6])
+    
+  }
+  
+  
+  Year.ts <- vector("list", 101)
+  Year.train.ts <- vector("list", 101)
+  Year.test.ts <- vector("list", 101)
+  for (i in 1:101) {
+    Year.ts[[i]]<-ts(ls.Year[[i]],start = ls.Year.start[[i]])
+    Year.train.ts[[i]]<-ts(ls.Year.train[[i]],start = ls.Year.start[[i]])
+    Year.test.ts[[i]]<-ts(ls.Year.test[[i]], start = ls.Year.test.start[[i]])
+  }
+  
+```
+  
+#Yearly Series Model Fitting
+  
+The yearly series does not have seasonality, so we will only be using the non seasonal state space models.Fitting possible models (Damped is set to FALSE in this section). 
+  
+```{r, echo=TRUE, cache=TRUE,message=FALSE,warning=FALSE}
+  models=c("ANN","MNN","MMN","MAN","AAN")
+  
+  Year.govals<-GoFVals(data=Year.train.ts,models = models)
+  
+  #year.leic<-LEIC(data=Year.train.ts,H=H,models = models)
+  # run from here
+  #year.pval<-pVal(data=Year.ts,H=H,models=models)
+  
+  #count(year.pval$best.model)
+  
+  #table(year.pval$best.model)
+```
+  
+  
+```{r,cache=TRUE,message=FALSE,warning=FALSE}
+  
+  Year.govals.df<-as.data.frame(Year.govals)
+  Year.GoF.Best<-group_by(Year.govals.df,GoF.series) %>%
+    slice(which.min(GoF.MASE))
+  
+  # Year.leic.df<-as.data.frame(year.leic)
+  # Year.leic.Best<-group_by(Year.leic.df,leic.series) %>%
+  #   slice(which.min(leic.values))
+  
+  table(Year.GoF.Best$GoF.FittedModels)
+  
+  # table(Year.leic.Best$leic.FittedModels)
+  
+  
+  GoFs.Year<-GoFVals(data=Year.train.ts,H=H,models = models)
+  Year.MASEs<-GoFs.Year$GoF$MASE
+  MASEvalues(data=Year.train.ts,model="MMN",MASEs = Year.MASEs) # 0.8324411
+  MASEvalues(data=Year.train.ts,model="MNN",MASEs = Year.MASEs)# 0.9811864
+  MASEvalues(data=Year.train.ts,model="AAN",MASEs = Year.MASEs)# best model .8001362
+  MASEvalues(data=Year.train.ts,model="ANN",MASEs = Year.MASEs)# 0.972452
+```
+  
+The best model comes out to be AAN with no damped condition with a MASE value of .8001362
+  
+Fitting possible models (with damped set to TRUE)
+  
+```{r,cache=TRUE,message=FALSE,warning=FALSE}
+  
+  models1=c("MMN","MAN","AAN")
+  
+  Year.govals.damped<-GoFVals_damped(data=Year.train.ts,H=H,models = models1)
+  
+  # year.leic.1<-LEIC(data=Year.train.ts,H=H,models = models1)
+  # 
+  # year.pval.1<-pVal(data=Year.ts,H=H,models=models1)
+  # 
+  # 
+  # table(year.pval.1$best.model)
+  
+  Year.govals.damped.df<-as.data.frame(Year.govals.damped)
+  Year.GoF.damped.Best<-group_by(Year.govals.damped.df,GoF.series) %>%
+    slice(which.min(GoF.MASE))
+  
+  table(Year.GoF.damped.Best$GoF.FittedModels)
+  
+  # Year.leic.df<-as.data.frame(year.leic)
+  # Year.leic.Best<-group_by(Year.leic.df,leic.series) %>%
+  #   slice(which.min(leic.values))
+  
+  
+  #table(Year.leic.Best$leic.FittedModels)
+  
+  
+  
+  Year.MASEs.damped<-Year.govals.damped$GoF$MASE
+  MASEvalues_Damped(data=Year.train.ts,model="MMN",MASEs = Year.MASEs.damped)#0.8407506
+  MASEvalues_Damped(data=Year.train.ts,model="AAN",MASEs = Year.MASEs.damped)# best model .7933918
+  #MASEvalues(data=Year.train.ts,H=H,model="MAN",MASEs = Year.MASEs.1)
+```
+  
+The best model for the yearly series appears to be AAN with damped set to TRUE with a MASE value of .7933.
+  
+We will now test this model over our test set.
+  
+#Applying selected best model over test series
+```{r,message=FALSE,warning=FALSE,cache=TRUE}
+  
+  model.Year.test=vector("list",101)
+  model.Year.test.MASE <- vector("list", 101)
+  
+  for(i in 1:101){
+    model.Year.test[[i]]<-ets(Year.test.ts[[i]],model = "AAN",damped=TRUE)
+    model.Year.test.MASE[[i]] <- as.data.frame(accuracy(model.Year.test[[i]]))
+  }
+  
+  sumList.Year <- 0
+  for (k in 1:101){
+    sumList.Year <- sumList.Year + model.Year.test.MASE[[k]]
+  }
+  
+  
+  (Year.Average.test.MASE <- sumList.Year/101)$MASE
+  
+  nonNormStdR <- 0
+  correlStdR <-0
+  for(i in 1:101){
+    if (shapiro.test(model.Year.test[[i]]$x)$p.value < 0.05){
+      nonNormStdR <- nonNormStdR + 1
+    }  
+    if (Box.test(model.Year.test[[i]]$x, lag = 1, type = "Ljung-Box", fitdf = 0) < 0.05){
+      correlStdR <- correlStdR + 1
+    }
+    
+  }
+  (nonNormStdR)
+  (correlStdR)
+  
+```
+  
+The best model selected in the training set was applied to the test set and we get a MASE value of .7152 which is better than our training set.
+  
+The residual analysis tells us that out of 101 series, after applying AAN model, with damped condition, there are 3 series in which residuals are not normally distributed and 17 series which have correlated residuals. Overall, we can say that AAN with damped set as TRUE is doing a fairly good job for generalizing the yearly time series.
+  
+  
+#Forecasting
+```{r,message=FALSE,warning=FALSE,cache=TRUE}
+  
+  model.train.year=vector("list",101)
+  
+  
+  for(i in 1:101){
+     model.train.year[[i]]<-ets(Year.train.ts[[i]],model = "AAN", damped= TRUE)
+  }
+  
+  forecast.train.year=vector("list",101)
+  forecasts=vector("list",101)
+  
+  for(i in 1:101){
+    forecast.train.year[[i]]<-forecast(Year.train.ts[[i]],model = model.train.year[[i]],h=length(Year.test.ts[[i]]))
+    forecasts[[i]]<-forecast.train.year[[i]]$mean
+   #MASE<- MASE.forecast(Month.train.ts[[i]],Month.test.ts[[i]],forecasts[[i]])
+  #MASE[[i]]<- MASE.forecast(Month.train.ts[[i]],Month.test.ts[[i]],forecasts[[i]])
+  }
+  
+  Year.train.ts<-unlist(Year.train.ts)
+  Year.test.ts<-unlist(Year.test.ts)
+  forecasts<-unlist(forecasts)
+  
+  MASE.forecast(Year.train.ts,Year.test.ts,forecasts)
+  
+```
+  
+The MASE value of the forecasted yearly series comes out to be 1.5728.
+  
+# Monthly Analysis
+  
+Importing the data and splitting into training and test data set
+```{r, cache=TRUE,,message=FALSE,warning=FALSE}
+  m3Month <- read_csv("C:/Users/Bhargab/Desktop/M3CMonth_reduced.csv")
+  m3Month <- as.data.frame(m3Month)
+  
+  
+  
+  Len <- nrow(m3Month)
+  name <- "m3Month" 
+  ls.Month <- vector("list",Len)
+  ls.Month.train <- vector("list", Len)
+  ls.Month.test <- vector("list",Len)
+  ls.Month.start <- vector("list",Len)
+  ls.Month.test.start <- vector("list", Len)
+  for (i in 1:Len) {
+    seriesLen <- m3Month[i,"N"]
+    Splitcolf <- floor(seriesLen*.8)
+    Splitcolc <- ceiling(seriesLen*.8)
+    
+    min.test <- 24
+    if ((seriesLen-Splitcolc) < min.test){
+      Splitcolc <- seriesLen - min.test
+      Splitcolf <- seriesLen - min.test - 1
+    }
+    
+    #for whole numbers floor and ceiling were the same resultin in values 
+    #being shared between the test and training sets
+    if (Splitcolf == Splitcolc){
+      Splitcolf <- Splitcolf - 1
+    }
+    
+    seriesLen <- seriesLen + 6
+    Splitcolf <- Splitcolf  + 6
+    Splitcolc <- Splitcolc + 6
+    ls.Month[[i]] <- as.vector(t(as.matrix(m3Month[i,7:seriesLen])))
+    ls.Month.train[[i]] <- as.vector(t(as.matrix(m3Month[i,7:Splitcolf])))
+    ls.Month.test[[i]] <- as.vector(t(as.matrix(m3Month[i,Splitcolc:seriesLen])))
+    ls.Month.start[[i]] <- c(m3Month[i,5],m3Month[i,6])
+    test.year <- (Splitcolf-6) %/% 12
+    test.month <- (Splitcolf-6) %% 12
+    ls.Month.test.start[[i]] <- c(m3Month[i,5] + test.year,m3Month[i,6] + test.month)
+  }
+  
+  Month.ts <- vector("list", 101)
+  Month.train.ts <- vector("list", 101)
+  Month.test.ts <- vector("list", 101)
+  for (i in 1:101) {
+    Month.ts[[i]]<-ts(ls.Month[[i]],start = ls.Month.start[[i]],frequency = 12)
+    Month.train.ts[[i]]<-ts(ls.Month.train[[i]],start = ls.Month.start[[i]],frequency = 12)
+    Month.test.ts[[i]]<-ts(ls.Month.test[[i]],start = ls.Month.test.start[[i]],frequency = 12)
+  }
+  
+```
+  
+#Monthly Series Model Fitting
+  
+Applying possible models (with damped set as FALSE)
+  
+```{r, cache=TRUE,message=FALSE,warning=FALSE}
+  
+  models=c("ANA","MNA","MNM","ANN","MMN","MAN","MAM","MMM","AAN","MNN","MAA","AAA")
+  
+  
+  Month.govals<-GoFVals(data=Month.train.ts,models = models)
+  
+  #Month.leic<-LEIC(data=Month.train.ts,H=H,models = models)
+  
+  #Month.pval<-pVal(data=Month.train.ts,H=H,models=models)
+  
+  #table(Month.pval$best.model)
+  
+  
+  
+  Month.govals.df<-as.data.frame(Month.govals)
+  Month.GoF.Best<-group_by(Month.govals.df,GoF.series) %>%
+    slice(which.min(GoF.MASE))
+  
+  table(Month.GoF.Best$GoF.FittedModels)
+  
+  # Month.leic.df<-as.data.frame(Month.leic)
+  # Month.leic.Best<-group_by(Month.leic.df,leic.series) %>%
+  #   slice(which.min(leic.values))
+  # 
+  # table(Month.leic.Best$leic.FittedModels)
+  
+  
+  Month.MASEs<-Month.govals$GoF$MASE
+  MASEvalues(data=Month.train.ts,model="MMM",MASEs = Month.MASEs) # MASE .333657
+  MASEvalues(data=Month.train.ts,model="MAM",MASEs = Month.MASEs) # BEST MASE 0.3312661
+  MASEvalues(data=Month.train.ts,model="AAA",MASEs = Month.MASEs) # MASE .3316113
+  MASEvalues(data=Month.train.ts,model="MAA",MASEs = Month.MASEs) # MASE .3366036
+  ```
+  
+  
+The best model for the monthly series with damped condition set as FALSE comes out to be MAM with a MASE value of .3312.
+  
+Fitting possible models (with damped set to TRUE)
+  
+```{r ,cache=TRUE,message=FALSE,warning=FALSE}
+  
+  models1=c("MMN","MAN","MAM","MMM","AAN","MAA","AAA")
+  
+  Month.govals.damped<-GoFVals_damped(data=Month.train.ts,models = models1)
+  
+  #Month.leic.1<-LEIC(data=Month.train.ts,H=H,models = models1)
+  
+  #Month.pval.1<-pVal_damped(data=Month.train.ts,H=H,models=models1)
+  
+  
+  #table(Month.pval.1$best.model)
+  
+  Month.govals.df.1<-as.data.frame(Month.govals.damped)
+  Month.GoF.Best.1<-group_by(Month.govals.df.1,GoF.series) %>%
+    slice(which.min(GoF.MASE))
+  
+  table(Month.GoF.Best.1$GoF.FittedModels)
+  
+  # Year.leic.df<-as.data.frame(year.leic)
+  # Year.leic.Best<-group_by(Year.leic.df,leic.series) %>%
+  #   slice(which.min(leic.values))
+  
+  
+  #table(Year.leic.Best$leic.FittedModels)
+  
+  Month.MASEs.damped<-Month.govals.damped$GoF$MASE
+  MASEvalues_Damped(data=Month.train.ts,model="MAM",MASEs = Month.MASEs.damped) # BEST MASE .3275258
+  MASEvalues_Damped(data=Month.train.ts,model="MMM",MASEs = Month.MASEs.damped) #MASE .3298483
+  MASEvalues_Damped(data=Month.train.ts,model="AAA",MASEs = Month.MASEs.damped) #MASE .3291703
+  
+```
+  
+The best model for the monthly series overall comes out to be MAM with damped set as TRUE with a MASE value of .3275. We will now apply this model over our test series.
+  
+#Applying selected best model over test set
+  
+```{r ,cache=TRUE,message=FALSE,warning=FALSE}
+  
+  model.test.month=vector("list",101)
+  model.test.month.MASE <- vector("list", 101)
+  
+  
+  
+  for(i in 1:101){
+    model.test.month[[i]]<-ets(Month.test.ts[[i]],model = "MAM", damped = TRUE)
+    model.test.month.MASE[[i]] <- as.data.frame(accuracy(model.test.month[[i]]))
+  }
+  
+  
+  sumList <- 0
+  for (k in 1:101){
+    sumList <- sumList + model.test.month.MASE[[k]]
+  }
+  
+  
+  (Average.MASE <- sumList/101)$MASE
+  
+  
+  nonNormStdR <- 0
+  correlStdR <-0
+  for(i in 1:101){
+    if (shapiro.test(model.test.month[[i]]$x)$p.value < 0.05){
+      nonNormStdR <- nonNormStdR + 1
+    }  
+    if (Box.test(model.test.month[[i]]$x, lag = 1, type = "Ljung-Box", fitdf = 0) < 0.05){
+      correlStdR <- correlStdR + 1
+    }
+    
+  }
+  (nonNormStdR)
+  (correlStdR)
+```
+  
+The best model selected in the training set was applied to the test set and we get a MASE value of .3267.
+  
+The residual analysis tells us that out of 101 series, after appplying MAM model, with damped condition, there are 33 series in which residuals are not normally distributed and 5 serieswhich have correlated residuals. Overall, we can say that MAM with damped set as TRUE is doing a fairly good job for generalizing the monthly time series.
+  
+#Forecasting
+```{r,message=FALSE,warning=FALSE,cache=TRUE}
+  
+  model.train.month=vector("list",101)
+  
+  
+  for(i in 1:101){
+     model.train.month[[i]]<-ets(Month.train.ts[[i]],model = "MAM", damped= TRUE)
+  }
+  
+  forecast.train.month=vector("list",101)
+  forecasts=vector("list",101)
+  
+  for(i in 1:101){
+    forecast.train.month[[i]]<-forecast(Month.train.ts[[i]],model = model.train.month[[i]],h=length(Month.test.ts[[i]]))
+    forecasts[[i]]<-forecast.train.month[[i]]$mean
+   #MASE<- MASE.forecast(Month.train.ts[[i]],Month.test.ts[[i]],forecasts[[i]])
+  #MASE[[i]]<- MASE.forecast(Month.train.ts[[i]],Month.test.ts[[i]],forecasts[[i]])
+  }
+  
+  Month.train.ts<-unlist(Month.train.ts)
+  Month.test.ts<-unlist(Month.test.ts)
+  forecasts<-unlist(forecasts)
+  
+  MASE.forecast(Month.train.ts,Month.test.ts,forecasts)
+  
+  
+```
+  
+The MASE value for the forecasted monthly series comes out to be 2.2705
+  
+# Quarterly Analysis
+  
+```{r, cache=TRUE,message=FALSE,warning=FALSE}
+  m3Quart <- read_csv("C:/Users/Bhargab/Desktop/M3CQuarter_reduced.csv")
+  m3Quart <- as.data.frame(m3Quart)
+  
+  
+  
+  Len <- nrow(m3Quart)
+  name <- "m3Quart" 
+  ls.Quart <- vector("list",Len)
+  ls.Quart.train <- vector("list", Len)
+  ls.Quart.test <- vector("list",Len)
+  ls.Quart.start <- vector("list",Len)
+  ls.Quart.test.start <- vector("list", Len)
+  for (i in 1:Len) {
+    seriesLen <- m3Quart[i,"N"]
+    Splitcolf <- floor(seriesLen*0.80)
+    Splitcolc <- ceiling(seriesLen*0.80)
+    
+    min.test <- 11
+    if ((seriesLen-Splitcolc) < min.test){
+      Splitcolc <- seriesLen - min.test
+      Splitcolf <- seriesLen - min.test - 1
+    }
+    
+    #for whole numbers floor and ceiling were the same resultin in values 
+    #being shared between the test and training sets
+    if (Splitcolf == Splitcolc){
+      Splitcolf <- Splitcolf - 1
+    }
+    
+    seriesLen <- seriesLen + 6
+    Splitcolf <- Splitcolf  + 6
+    Splitcolc <- Splitcolc + 6
+    ls.Quart[[i]] <- as.vector(t(as.matrix(m3Quart[i,7:seriesLen])))
+    ls.Quart.train[[i]] <- as.vector(t(as.matrix(m3Quart[i,7:Splitcolf])))
+    ls.Quart.test[[i]] <- as.vector(t(as.matrix(m3Quart[i,Splitcolc:seriesLen])))
+    ls.Quart.start[[i]] <- c(m3Quart[i,5],m3Quart[i,6])
+     Test.Year <- (Splitcolf - 6) %/% 4
+    Test.Quart <- (Splitcolf - 6) %% 4
+    ls.Quart.test.start[[i]] <- c(m3Quart[i,5]+Test.Year, m3Quart[i,6]+Test.Quart)
+  }
+  
+  
+  Quart.ts <- vector("list", 101)
+  Quart.train.ts <- vector("list", 101)
+  Quart.test.ts <- vector("list", 101)
+  for (i in 1:101) {
+    Quart.ts[[i]]<-ts(ls.Quart[[i]],start = ls.Quart.start[[i]],frequency = 4)
+    Quart.train.ts[[i]]<-ts(ls.Quart.train[[i]],start = ls.Quart.start[[i]],frequency = 4)
+    Quart.test.ts[[i]]<-ts(ls.Quart.test[[i]],start = ls.Quart.test.start[[i]],frequency = 4)
+  }
+  
+```
+  
+#Fitting Models
+  
+Fitting possible models (With damped set as FALSE)
+  
+```{r, cache=TRUE,message=FALSE,warning=FALSE}
+  
+  models=c("ANA","MNA","MNM","ANN","MMN","MAN","MAM","MMM","AAN","MNN","MAA","AAA")
+  
+  Quart.govals<-GoFVals(data=Quart.train.ts,models = models)
+  
+  #Quart.leic<-LEIC(data=Quart.train.ts,H=H,models = models)
+  #Quart.leic<-LEIC(data=data,H=H,models = models)
+  
+  #Quart.pval<-pVal(data=Quart.train.ts,H=H,models=models)
+  
+  
+  Quart.govals.df<-as.data.frame(Quart.govals)
+  Quart.GoF.Best<-group_by(Quart.govals.df,GoF.series) %>%
+    slice(which.min(GoF.MASE))
+  
+  
+  #Quart.leic.df<-as.data.frame(Quart.leic)
+  #Quart.leic.Best<-group_by(Quart.leic.df,leic.series) %>%
+  #  slice(which.min(leic.values))
+  
+  table(Quart.GoF.Best$GoF.FittedModels)
+  
+  #table(Quart.leic.Best$leic.FittedModels)
+  
+  #table(Quart.pval$best.model)
+  
+  
+  Quart.MASEs<-Quart.govals$GoF$MASE
+  MASEvalues(data=Quart.train.ts,model="MMM",MASEs = Quart.MASEs) #mean.Mase -- 0.3991114
+  MASEvalues(data=Quart.train.ts,model="MAM",MASEs = Quart.MASEs) #mean.Mase -- 0.398252
+  MASEvalues(data=Quart.train.ts,model="MAA",MASEs = Quart.MASEs) #mean.Mase -- 0.3978195
+  MASEvalues(data=Quart.train.ts,model="AAA",MASEs = Quart.MASEs)# best model -- 0.3947795
+  
+```
+  
+The best model for the quarterly series comes out to be AAA with a MASE value of .3947. We will now fit more models with damped condition and see if we can get better MASE values.
+  
+Fitting more models (With damped set a TRUE)
+  
+```{r, cache=TRUE,message=FALSE,warning=FALSE}
+  models_damped=c("MMN","MAN","MAM","MMM","AAN","MAA","AAA")
+  
+  Quart.govals.damped<-GoFVals_damped(data=Quart.train.ts,models = models_damped)
+  
+  #Quart.leic.1<-LEIC(data=Quart.train.ts,H=H,models = models1)
+  
+  #Quart.pval.1<-pVal(data=Quart.train.ts,H=H,models=models1)
+  
+  
+  #table(Quart.pval.1$best.model)
+  
+  Quart.govals.damped.df<-as.data.frame(Quart.govals.damped)
+  Quart.GoF.damped.Best<-group_by(Quart.govals.damped.df,GoF.series) %>%
+    slice(which.min(GoF.MASE))
+  
+  #Quart.leic.df<-as.data.frame(Quart.leic)
+  #Quart.leic.Best<-group_by(Quart.leic.df,leic.series) %>%
+  #  slice(which.min(leic.values))
+  
+  table(Quart.GoF.damped.Best$GoF.FittedModels)
+  
+  #table(Quart.leic.Best$leic.FittedModels)
+  
+  
+  
+  Quart.damped.MASEs<-Quart.govals.damped$GoF$MASE
+  MASEvalues_Damped(data=Quart.train.ts,model="MAM",MASEs = Quart.damped.MASEs) #Best Model -- 0.3939992
+  MASEvalues_Damped(data=Quart.train.ts,model="MMM",MASEs = Quart.damped.MASEs) #mean Mase -- 0.3945247 
+  MASEvalues_Damped(data=Quart.train.ts,model="MMN",MASEs = Quart.damped.MASEs) #mean.Mase -- 0.581202
+  MASEvalues_Damped(data=Quart.train.ts,model="AAA",MASEs = Quart.damped.MASEs) #mean.Mase -- 0.394855
+  MASEvalues_Damped(data=Quart.train.ts,model="MAA",MASEs = Quart.damped.MASEs) #mean.Mase -- 0.3980407
+  
+  
+```
+  
+The best model overall for the quarterly seris seems to me MAM with a damped trend. The corresponding MASE value is .3939. We will now apply this mdoel to our test series. 
+  
+#Applying selected best model over test set
+  
+```{r, cache=TRUE,message=FALSE,warning=FALSE}
+  model.Quart.test=vector("list",101)
+  model.Quart.test.MASE <- vector("list", 101)
+  
+  #View(Year.test.ts[1])
+  
+  for(i in 1:101){
+    model.Quart.test[[i]]<-ets(Quart.test.ts[[i]],model = "MAM",damped = TRUE)
+    model.Quart.test.MASE[[i]] <- as.data.frame(accuracy(model.Quart.test[[i]]))
+  }
+  
+  
+  sumList.Quart <- 0
+  for (k in 1:101){
+    sumList.Quart <- sumList.Quart + model.Quart.test.MASE[[k]]
+  }
+  
+  
+  (Quart.test.Average.MASE <- sumList.Quart/101)$MASE
+  
+  nonNormStdR.Quart<- 0
+  correlStdR.Quart<-0
+  for(i in 1:101){
+    if (shapiro.test(model.Quart.test[[i]]$x)$p.value < 0.05){
+      nonNormStdR.Quart <- nonNormStdR.Quart + 1
+    }  
+    if (Box.test(model.Quart.test[[i]]$x, lag = 1, type = "Ljung-Box", fitdf = 0) < 0.05){
+      correlStdR.Quart <- correlStdR.Quart + 1
+    }
+  }
+  nonNormStdR.Quart
+  correlStdR.Quart
+```
+  
+  
+The best model selected in the training set was applied to the test set and we get a MASE value of .3438.
+  
+The residual analysis tells us that out of 101 series, after applying MAM model, with damped condition, there are 23 series in which residuals are not normally distributed and 9 series which have correlated residuals. Overall, we can say that MAM with damped set as TRUE is doing a fairly good job for generalizing the monthly time series.
+  
+  
+#Forecasting
+```{r,message=FALSE,warning=FALSE,cache=TRUE}
+  
+  model.train.quart=vector("list",101)
+  
+  
+  for(i in 1:101){
+     model.train.quart[[i]]<-ets(Quart.train.ts[[i]],model = "MAM", damped= TRUE)
+  }
+  
+  forecast.train.quart=vector("list",101)
+  forecasts=vector("list",101)
+  
+  for(i in 1:101){
+    forecast.train.quart[[i]]<-forecast(Quart.train.ts[[i]],model = model.train.quart[[i]],h=length(Quart.test.ts[[i]]))
+    forecasts[[i]]<-forecast.train.quart[[i]]$mean
+   #MASE<- MASE.forecast(Month.train.ts[[i]],Month.test.ts[[i]],forecasts[[i]])
+  #MASE[[i]]<- MASE.forecast(Month.train.ts[[i]],Month.test.ts[[i]],forecasts[[i]])
+  }
+  
+  Quart.train.ts<-unlist(Quart.train.ts)
+  Quart.test.ts<-unlist(Quart.test.ts)
+  forecasts<-unlist(forecasts)
+  
+  MASE.forecast(Quart.train.ts,Quart.test.ts,forecasts)
+```
+  
+The MASE value for the forecasted quarterly series comes out to be 1.8804
+  
+#RESULT DISCUSSION
+  
+The idea of multiple series modelling and forecasting is to determine one best model that can generalize for all the series. This was done efficiently in this project and best model was selected based on MASE values. Prior to that, all possible models were fit to each series and the models with the highest number of occurences were applied. Other than that, additional steps like linear empirical information criterion (LEIC) and prediction validation were used in some cases. The mentioned techniques are very computation intensive and were not included in the selection of the final model.
+  
+The following table shows the models fit and the number of times they were the best:
+  
+<center>
+<img src="C:/Users/Bhargab/Desktop/Capture.png" width="90%">
+</center>
+  
+The table below gives a concise view of the residual and serial correlation analysis:
+  
+<center>
+<img src="C:/Users/Bhargab/Desktop/Capture1.png" width="90%">
+</center>
+  
+  The table below shows the MASE values obtained for the training set and the forecasted values:
+  
+  <center>
+  <img src="C:/Users/Bhargab/Desktop/Capture2.png" width="90%">
+  </center>
